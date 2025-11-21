@@ -1,0 +1,179 @@
+name: Terraform
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - "terraform/*/vars/**/*.tfvars"
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/*/vars/**/*.tfvars"
+
+env:
+  TF_VERSION: "1.6.0"
+  AWS_REGION: "us-east-1"
+
+permissions:
+  id-token: write # Required for OIDC
+  contents: read # Required to checkout code
+  pull-requests: write # Required to comment on PRs
+
+jobs:
+  detect-changes:
+    name: Detect Changed Resources
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v47
+        with:
+          files: terraform/*/vars/**/*.tfvars
+
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          CHANGED_DIRS=$(echo '${{ steps.changed-files.outputs.all_changed_files }}' | \
+            xargs -n1 dirname | sort -u | jq -R -s -c 'split("\n")[:-1]')
+          echo "matrix={\"dir\":${CHANGED_DIRS}}" >> $GITHUB_OUTPUT
+
+  terraform-plan:
+    name: Terraform Plan
+    needs: detect-changes
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && needs.detect-changes.outputs.matrix != '{"dir":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.detect-changes.outputs.matrix)}}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Verify AWS Role ARN Secret
+        run: |
+          if [ -z "${{ secrets.AWS_ROLE_ARN }}" ]; then
+            echo "Error: AWS_ROLE_ARN secret is not set"
+            echo "Please add AWS_ROLE_ARN secret to repository settings"
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-TerraformPlan
+
+      - name: Determine Resource Type
+        id: resource-type
+        run: |
+          DIR="${{ matrix.dir }}"
+          if [[ $DIR == *"/s3/"* ]]; then
+            echo "type=s3" >> $GITHUB_OUTPUT
+          elif [[ $DIR == *"/ec2/"* ]]; then
+            echo "type=ec2" >> $GITHUB_OUTPUT
+          elif [[ $DIR == *"/rds/"* ]]; then
+            echo "type=rds" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Terraform Init
+        run: |
+          cd terraform/${{ steps.resource-type.outputs.type }}
+          terraform init -upgrade \
+            -backend-config="${{ github.workspace }}/${{ matrix.dir }}/backend.config"
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd terraform/${{ steps.resource-type.outputs.type }}
+          terraform plan \
+            -var-file="${{ github.workspace }}/${{ matrix.dir }}/terraform.tfvars" \
+            -out=tfplan \
+            -no-color
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Terraform Plan 📖 \`${{ steps.resource-type.outputs.type }}\`
+            **Directory**: \`${{ matrix.dir }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+
+            </details>`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+  terraform-apply:
+    name: Terraform Apply
+    needs: detect-changes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-changes.outputs.matrix != '{"dir":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.detect-changes.outputs.matrix)}}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Verify AWS Role ARN Secret
+        run: |
+          if [ -z "${{ secrets.AWS_ROLE_ARN }}" ]; then
+            echo "Error: AWS_ROLE_ARN secret is not set"
+            echo "Please add AWS_ROLE_ARN secret to repository settings"
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-TerraformApply
+
+      - name: Determine Resource Type
+        id: resource-type
+        run: |
+          DIR="${{ matrix.dir }}"
+          if [[ $DIR == *"/s3/"* ]]; then
+            echo "type=s3" >> $GITHUB_OUTPUT
+          elif [[ $DIR == *"/ec2/"* ]]; then
+            echo "type=ec2" >> $GITHUB_OUTPUT
+          elif [[ $DIR == *"/rds/"* ]]; then
+            echo "type=rds" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Terraform Init
+        run: |
+          cd terraform/${{ steps.resource-type.outputs.type }}
+          terraform init -upgrade \
+            -backend-config="${{ github.workspace }}/${{ matrix.dir }}/backend.config"
+
+      - name: Terraform Apply
+        run: |
+          cd terraform/${{ steps.resource-type.outputs.type }}
+          terraform apply \
+            -var-file="${{ github.workspace }}/${{ matrix.dir }}/terraform.tfvars" \
+            -auto-approve

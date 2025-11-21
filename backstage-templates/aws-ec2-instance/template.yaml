@@ -1,0 +1,187 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: aws-ec2-instance
+  title: AWS EC2 Instance
+  description: Create an EC2 instance for testing and development
+  tags:
+    - aws
+    - ec2
+    - compute
+    - terraform
+spec:
+  owner: platform-team
+  type: service
+
+  parameters:
+    - title: EC2 Instance Configuration
+      required:
+        - instanceName
+        - environment
+        - owner
+      properties:
+        instanceName:
+          title: Instance Name
+          type: string
+          description: Name tag for the EC2 instance
+          pattern: "^[a-zA-Z0-9-_]+$"
+          ui:autofocus: true
+
+        environment:
+          title: Environment
+          type: string
+          enum:
+            - dev
+            - test
+            - staging
+          default: dev
+
+        instanceType:
+          title: Instance Type
+          type: string
+          description: EC2 instance type
+          enum:
+            - t3.micro
+            - t3.small
+            - t3.medium
+            - t3.large
+            - t3.xlarge
+          enumNames:
+            - t3.micro (2 vCPU, 1 GB RAM)
+            - t3.small (2 vCPU, 2 GB RAM)
+            - t3.medium (2 vCPU, 4 GB RAM)
+            - t3.large (2 vCPU, 8 GB RAM)
+            - t3.xlarge (4 vCPU, 16 GB RAM)
+          default: t3.micro
+
+        vpcId:
+          title: VPC ID (Optional)
+          type: string
+          description: VPC ID (leave empty to lookup by VPC name)
+          pattern: "^(vpc-[a-f0-9]+)?$"
+          default: ""
+
+        vpcName:
+          title: VPC Name
+          type: string
+          description: VPC name (used if VPC ID is empty)
+          default: ""
+          ui:help: "Leave empty to use default VPC, or specify your VPC name tag"
+
+        subnetId:
+          title: Subnet ID (Optional)
+          type: string
+          description: Subnet ID (leave empty to auto-select from VPC)
+          pattern: "^(subnet-[a-f0-9]+)?$"
+          default: ""
+
+        securityGroupRules:
+          title: Security Group Rules
+          type: array
+          description: Inbound security group rules (optional)
+          items:
+            type: object
+            required:
+              - port
+              - protocol
+              - cidr
+            properties:
+              port:
+                type: number
+                title: Port
+                minimum: 1
+                maximum: 65535
+              protocol:
+                type: string
+                title: Protocol
+                enum: [tcp, udp, icmp]
+                default: tcp
+              cidr:
+                type: string
+                title: CIDR Block
+                default: 10.0.0.0/16
+                ui:help: "Default VPC CIDR (10.0.0.0/16) - allows access from within VPC"
+          default: []
+
+        owner:
+          title: Owner
+          type: string
+          description: Team name or email responsible for this instance
+          ui:help: "Enter team name or email (e.g., platform-team, devops@company.com)"
+
+    - title: Repository Configuration (Optional)
+      properties:
+        githubOrg:
+          title: GitHub Organization
+          type: string
+          description: GitHub organization (leave empty to use default)
+          default: ${GITHUB_ORG}
+          ui:help: "Default: Your forked repository organization"
+
+        githubRepo:
+          title: GitHub Repository
+          type: string
+          description: GitHub repository name (leave empty to use default)
+          default: ${GITHUB_REPO}
+          ui:help: "Default: ${GITHUB_REPO}"
+
+  steps:
+    - id: fetch-base
+      name: Fetch Terraform Template
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          instanceName: ${{ parameters.instanceName }}
+          environment: ${{ parameters.environment }}
+          instanceType: ${{ parameters.instanceType }}
+          volumeSize: 20
+          vpcId: ${{ parameters.vpcId }}
+          vpcName: ${{ parameters.vpcName }}
+          subnetId: ${{ parameters.subnetId }}
+          securityGroupRules: ${{ parameters.securityGroupRules }}
+          owner: ${{ parameters.owner }}
+          username: ${{ user.entity.metadata.name | default("unknown") }}
+          timestamp: ${{ parameters.instanceName }}-${{ parameters.environment }}
+
+    - id: publish
+      name: Create Pull Request
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=${{ parameters.githubOrg or '${GITHUB_ORG}' }}&repo=${{ parameters.githubRepo or '${GITHUB_REPO}' }}
+        branchName: ec2-${{ parameters.instanceName }}-${{ parameters.environment }}
+        title: Create EC2 Instance - ${{ parameters.instanceName }}
+        update: true
+        description: >
+          ## EC2 Instance Request
+
+
+          **Instance Name**: ${{ parameters.instanceName }}
+
+          **Environment**: ${{ parameters.environment }}
+
+          **Instance Type**: ${{ parameters.instanceType }}
+
+          **AMI**: Latest Amazon Linux 2023 (auto-selected)
+
+          **VPC ID**: ${{ parameters.vpcId if parameters.vpcId else 'Lookup by name: ' + parameters.vpcName }}
+
+          **Subnet ID**: ${{ parameters.subnetId if parameters.subnetId else 'Auto-selected from VPC' }}
+
+          **Owner**: ${{ user.entity.metadata.name if user.entity.metadata.name else 'unknown' }}
+
+          **Deployment**: Private subnet, no public IP
+
+
+          ---
+
+          This PR was automatically generated by Backstage.
+        targetPath: terraform/ec2/vars/${{ parameters.instanceName }}/${{ parameters.environment }}
+
+  output:
+    links:
+      - title: View Pull Request
+        url: ${{ steps.publish.output.remoteUrl }}
+      - title: View in GitHub
+        icon: github
+        url: https://github.com/${{ parameters.githubOrg or '${GITHUB_ORG}' }}/${{ parameters.githubRepo or '${GITHUB_REPO}' }}/tree/main/terraform/ec2/vars/${{ parameters.instanceName }}/${{ parameters.environment }}

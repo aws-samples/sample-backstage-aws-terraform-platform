@@ -1,0 +1,35 @@
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: aws-s3-bucket-templates
+  description: AWS S3 Bucket template and component definitions
+spec:
+  targets:
+    - ./template.yaml
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: aws-s3-bucket-template
+  title: AWS S3 Bucket Template
+  description: Self-service template for creating S3 buckets with versioning, encryption, and lifecycle policies
+  annotations:
+    github.com/project-slug: YOUR_GITHUB_ORG/${GITHUB_REPO}
+  tags:
+    - terraform
+    - aws
+    - s3
+    - storage
+    - template
+  links:
+    - url: https://github.com/YOUR_GITHUB_ORG/${GITHUB_REPO}/tree/main/backstage-templates/aws-s3-bucket
+      title: Template Source
+      icon: github
+    - url: https://github.com/YOUR_GITHUB_ORG/${GITHUB_REPO}/tree/main/terraform/s3
+      title: Terraform Module
+      icon: code
+spec:
+  type: template
+  owner: platform-team
+  lifecycle: production
+  system: aws-infrastructure

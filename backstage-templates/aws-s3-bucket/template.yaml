@@ -1,0 +1,179 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: aws-s3-bucket
+  title: AWS S3 Bucket
+  description: Create an S3 bucket for your testing needs
+  tags:
+    - aws
+    - s3
+    - storage
+    - terraform
+spec:
+  owner: platform-team
+  type: service
+
+  parameters:
+    - title: S3 Bucket Configuration
+      required:
+        - bucketName
+        - environment
+        - owner
+      properties:
+        bucketName:
+          title: Bucket Name
+          type: string
+          description: Name of the S3 bucket (must be globally unique)
+          pattern: "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+          maxLength: 63
+          ui:autofocus: true
+          ui:help: "Use lowercase letters, numbers, and hyphens only"
+
+        environment:
+          title: Environment
+          type: string
+          description: Environment for this bucket
+          enum:
+            - dev
+            - test
+            - staging
+          enumNames:
+            - Development
+            - Testing
+            - Staging
+          default: dev
+
+        versioning:
+          title: Enable Versioning
+          type: boolean
+          description: Enable versioning for this bucket
+          default: false
+
+        encryption:
+          title: Encryption Type
+          type: string
+          description: Server-side encryption type
+          enum:
+            - AES256
+            - aws:kms
+          enumNames:
+            - S3 Managed (AES256)
+            - KMS Managed
+          default: AES256
+
+        publicAccess:
+          title: Block Public Access
+          type: boolean
+          description: Block all public access to this bucket
+          default: true
+
+        lifecycleEnabled:
+          title: Enable Lifecycle Policy
+          type: boolean
+          description: Enable lifecycle policy to transition objects to cheaper storage
+          default: false
+
+        lifecycleDays:
+          title: Days Before Transition
+          type: number
+          description: Number of days before transitioning to IA storage
+          default: 30
+          minimum: 30
+          ui:widget: range
+          ui:options:
+            min: 30
+            max: 365
+            step: 30
+
+        tags:
+          title: Additional Tags
+          type: object
+          description: Additional tags for the bucket
+          additionalProperties:
+            type: string
+          ui:options:
+            orderable: false
+
+        owner:
+          title: Owner
+          type: string
+          description: Team name or email responsible for this bucket
+          ui:help: "Enter team name or email (e.g., data-team, storage@company.com)"
+
+    - title: Repository Configuration (Optional)
+      properties:
+        githubOrg:
+          title: GitHub Organization
+          type: string
+          description: GitHub organization (leave empty to use default)
+          default: ${GITHUB_ORG}
+          ui:help: "Default: Your forked repository organization"
+
+        githubRepo:
+          title: GitHub Repository
+          type: string
+          description: GitHub repository name (leave empty to use default)
+          default: ${GITHUB_REPO}
+          ui:help: "Default: ${GITHUB_REPO}"
+
+  steps:
+    - id: fetch-base
+      name: Fetch Terraform Template
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          bucketName: ${{ parameters.bucketName }}
+          environment: ${{ parameters.environment }}
+          versioning: ${{ parameters.versioning }}
+          encryption: ${{ parameters.encryption }}
+          publicAccess: ${{ parameters.publicAccess }}
+          lifecycleEnabled: ${{ parameters.lifecycleEnabled }}
+          lifecycleDays: ${{ parameters.lifecycleDays }}
+          owner: ${{ parameters.owner }}
+          tags: ${{ parameters.tags | default({}) }}
+          username: ${{ user.entity.metadata.name | default("unknown") }}
+          timestamp: ${{ parameters.bucketName }}-${{ parameters.environment }}
+
+    - id: publish
+      name: Create Pull Request
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=${{ parameters.githubOrg or '${GITHUB_ORG}' }}&repo=${{ parameters.githubRepo or '${GITHUB_REPO}' }}
+        branchName: s3-${{ parameters.bucketName }}-${{ parameters.environment }}
+        title: Create S3 Bucket - ${{ parameters.bucketName }}
+        update: true
+        description: >
+          ## S3 Bucket Request
+
+
+          **Bucket Name**: ${{ parameters.bucketName }}
+
+          **Environment**: ${{ parameters.environment }}
+
+          **Owner**: ${{ parameters.owner }}
+
+          **Versioning**: ${{ parameters.versioning }}
+
+          **Encryption**: ${{ parameters.encryption }}
+
+          **Public Access**: ${{ 'Blocked' if parameters.publicAccess else 'Allowed' }}
+
+          **Lifecycle Policy**: ${{ 'Enabled' if parameters.lifecycleEnabled else 'Disabled' }}
+
+
+          ---
+
+          This PR was automatically generated by Backstage.
+        targetPath: terraform/s3/vars/${{ parameters.bucketName }}/${{ parameters.environment }}
+
+  output:
+    links:
+      - title: View Pull Request
+        url: ${{ steps.publish.output.remoteUrl }}
+      - title: View in GitHub
+        icon: github
+        url: https://github.com/${{ parameters.githubOrg or '${GITHUB_ORG}' }}/${{ parameters.githubRepo or '${GITHUB_REPO}' }}/tree/main/terraform/s3/vars/${{ parameters.bucketName }}/${{ parameters.environment }}
+      - title: AWS S3 Console
+        icon: cloud
+        url: https://s3.console.aws.amazon.com/s3/buckets/${{ parameters.bucketName }}

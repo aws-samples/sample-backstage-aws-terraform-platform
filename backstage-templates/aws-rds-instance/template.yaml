@@ -1,0 +1,278 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: aws-rds-instance
+  title: AWS RDS Database
+  description: Create an RDS database instance for testing
+  tags:
+    - aws
+    - rds
+    - database
+    - terraform
+spec:
+  owner: platform-team
+  type: service
+  
+  parameters:
+    - title: RDS Instance Configuration
+      required:
+        - dbIdentifier
+        - environment
+        - owner
+      properties:
+        dbIdentifier:
+          title: Database Identifier
+          type: string
+          description: Unique identifier for the RDS instance
+          pattern: '^[a-z][a-z0-9-]*$'
+          maxLength: 63
+          ui:autofocus: true
+          ui:help: 'Use lowercase letters, numbers, and hyphens only'
+        
+        environment:
+          title: Environment
+          type: string
+          enum:
+            - dev
+            - test
+            - staging
+          default: dev
+        
+        engine:
+          title: Database Engine
+          type: string
+          enum:
+            - postgres
+            - mysql
+            - mariadb
+          enumNames:
+            - PostgreSQL
+            - MySQL
+            - MariaDB
+          default: postgres
+        
+        engineVersion:
+          title: Engine Version
+          type: string
+          description: Database engine version
+          enum:
+            - postgres-14
+            - postgres-15
+            - mysql-8.0
+            - mariadb-10.6
+          enumNames:
+            - PostgreSQL 14
+            - PostgreSQL 15
+            - MySQL 8.0
+            - MariaDB 10.6
+          default: postgres-15
+        
+        instanceClass:
+          title: Instance Class
+          type: string
+          description: RDS instance class
+          enum:
+            - db.t3.micro
+            - db.t3.small
+            - db.t3.medium
+            - db.t3.large
+          enumNames:
+            - db.t3.micro (1 vCPU, 1 GB RAM)
+            - db.t3.small (2 vCPU, 2 GB RAM)
+            - db.t3.medium (2 vCPU, 4 GB RAM)
+            - db.t3.large (2 vCPU, 8 GB RAM)
+          default: db.t3.micro
+        
+        allocatedStorage:
+          title: Storage Size (GB)
+          type: number
+          description: Allocated storage in GB
+          default: 20
+          minimum: 20
+          maximum: 100
+        
+        storageType:
+          title: Storage Type
+          type: string
+          enum:
+            - gp3
+            - gp2
+          enumNames:
+            - General Purpose SSD (gp3)
+            - General Purpose SSD (gp2)
+          default: gp3
+        
+        dbName:
+          title: Initial Database Name
+          type: string
+          description: Name of the initial database to create
+          pattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+        
+        masterUsername:
+          title: Master Username
+          type: string
+          description: Master username for database access
+          default: admin
+          pattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+        
+        port:
+          title: Database Port
+          type: number
+          description: Port for database connections
+          default: 5432
+        
+        multiAz:
+          title: Multi-AZ Deployment
+          type: boolean
+          description: Enable Multi-AZ for high availability
+          default: false
+        
+        backupRetention:
+          title: Backup Retention (Days)
+          type: number
+          description: Number of days to retain automated backups
+          default: 7
+          minimum: 0
+          maximum: 35
+        
+        publiclyAccessible:
+          title: Publicly Accessible
+          type: boolean
+          description: Make database publicly accessible
+          default: false
+        
+        enableEncryption:
+          title: Enable Encryption
+          type: boolean
+          description: Enable encryption at rest
+          default: true
+        
+        autoMinorVersionUpgrade:
+          title: Auto Minor Version Upgrade
+          type: boolean
+          description: Enable automatic minor version upgrades
+          default: true
+        
+        deletionProtection:
+          title: Deletion Protection
+          type: boolean
+          description: Enable deletion protection
+          default: false
+        
+        vpcId:
+          title: VPC ID (Optional)
+          type: string
+          description: VPC ID (leave empty to use default VPC)
+          pattern: "^(vpc-[a-f0-9]+)?$"
+          default: ""
+        
+        subnetIds:
+          title: Subnet IDs (Optional)
+          type: string
+          description: Comma-separated subnet IDs (leave empty to use all subnets in VPC)
+          default: ""
+          ui:help: "Example: subnet-abc123,subnet-def456"
+        
+        owner:
+          title: Owner
+          type: string
+          description: Team name or email responsible for this database
+          ui:help: "Enter team name or email (e.g., backend-team, database@company.com)"
+
+    - title: Repository Configuration (Optional)
+      properties:
+        githubOrg:
+          title: GitHub Organization
+          type: string
+          description: GitHub organization (leave empty to use default)
+          default: ${GITHUB_ORG}
+          ui:help: "Default: Your forked repository organization"
+
+        githubRepo:
+          title: GitHub Repository
+          type: string
+          description: GitHub repository name (leave empty to use default)
+          default: ${GITHUB_REPO}
+          ui:help: "Default: ${GITHUB_REPO}"
+
+  steps:
+    - id: fetch-base
+      name: Fetch Terraform Template
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          dbIdentifier: ${{ parameters.dbIdentifier }}
+          environment: ${{ parameters.environment }}
+          engine: ${{ parameters.engine }}
+          engineVersion: ${{ parameters.engineVersion }}
+          instanceClass: ${{ parameters.instanceClass }}
+          allocatedStorage: ${{ parameters.allocatedStorage }}
+          storageType: ${{ parameters.storageType }}
+          dbName: ${{ parameters.dbName }}
+          masterUsername: ${{ parameters.masterUsername }}
+          port: ${{ parameters.port }}
+          multiAz: ${{ parameters.multiAz }}
+          backupRetention: ${{ parameters.backupRetention }}
+          publiclyAccessible: ${{ parameters.publiclyAccessible }}
+          enableEncryption: ${{ parameters.enableEncryption }}
+          autoMinorVersionUpgrade: ${{ parameters.autoMinorVersionUpgrade }}
+          deletionProtection: ${{ parameters.deletionProtection }}
+          vpcId: ${{ parameters.vpcId | default("") }}
+          subnetIds: ${{ parameters.subnetIds | default("") }}
+          owner: ${{ parameters.owner }}
+          username: ${{ user.entity.metadata.name | default("unknown") }}
+          timestamp: ${{ parameters.dbIdentifier }}-${{ parameters.environment }}
+
+    - id: publish
+      name: Create Pull Request
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=${{ parameters.githubOrg or '${GITHUB_ORG}' }}&repo=${{ parameters.githubRepo or '${GITHUB_REPO}' }}
+        branchName: rds-${{ parameters.dbIdentifier }}-${{ parameters.environment }}
+        title: Create RDS Instance - ${{ parameters.dbIdentifier }}
+        update: true
+        description: >
+          ## RDS Instance Request
+
+
+          **DB Identifier**: ${{ parameters.dbIdentifier }}
+
+          **Environment**: ${{ parameters.environment }}
+
+          **Engine**: ${{ parameters.engine }} (${{ parameters.engineVersion }})
+
+          **Instance Class**: ${{ parameters.instanceClass }}
+
+          **Storage**: ${{ parameters.allocatedStorage }} GB (${{ parameters.storageType }})
+
+          **Multi-AZ**: ${{ 'Enabled' if parameters.multiAz else 'Disabled' }}
+
+          **Backup Retention**: ${{ parameters.backupRetention }} days
+
+          **VPC ID**: ${{ parameters.vpcId if parameters.vpcId else 'Default VPC' }}
+
+          **Owner**: ${{ parameters.owner }}
+
+
+          ---
+
+          ⚠️ **Security Note**: Master password will be auto-generated and stored in AWS Secrets Manager.
+
+
+          This PR was automatically generated by Backstage.
+        targetPath: terraform/rds/vars/${{ parameters.dbIdentifier }}/${{ parameters.environment }}
+
+  output:
+    links:
+      - title: View Pull Request
+        url: ${{ steps.publish.output.remoteUrl }}
+      - title: View in GitHub
+        icon: github
+        url: https://github.com/${{ parameters.githubOrg or '${GITHUB_ORG}' }}/${{ parameters.githubRepo or '${GITHUB_REPO}' }}/tree/main/terraform/rds/vars/${{ parameters.dbIdentifier }}/${{ parameters.environment }}
+      - title: AWS RDS Console
+        icon: cloud
+        url: https://console.aws.amazon.com/rds/home?region=us-east-1#database:id=${{ parameters.dbIdentifier }}
+      - title: Database Password (Secrets Manager)
+        icon: key
+        url: https://console.aws.amazon.com/secretsmanager/home?region=us-east-1#!/listSecrets/

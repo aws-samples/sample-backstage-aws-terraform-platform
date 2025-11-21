@@ -1,0 +1,82 @@
+# Backstage Terraform IDP - Git Ignore
+
+# CloudFormation parameters (contains sensitive data)
+parameters.json
+backstage-setup/parameters.json
+
+# Backstage app directory (generated during build)
+backstage-setup/image/backstage-app/
+backstage-setup/scripts/backstage-app/
+
+# Node modules
+node_modules/
+**/node_modules/
+
+# Yarn
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.tfvars
+
+# AWS
+.aws/
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Secrets
+secrets/
+*.pem
+*.key
+*.crt
+
+# Customer config (may contain sensitive data)
+customer-config.yaml
+
+# Backstage
+app-config.local.yaml
+app-config.*.yaml
+!app-config.yaml
+!app-config.production.yaml

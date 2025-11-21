@@ -1,0 +1,987 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Simplified Backstage Stack - Uses existing VPC and EKS cluster with all security vulnerabilities fixed'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Existing Infrastructure'
+        Parameters:
+          - ExistingVPCId
+          - ExistingVPCCidr
+          - ExistingPrivateSubnet1
+          - ExistingPrivateSubnet2
+          - ExistingEKSCluster
+          - ExistingEKSNamespace
+      - Label:
+          default: 'RDS Database Configuration'
+        Parameters:
+          - DBInstanceClass
+          - DBAllocatedStorage
+          - DBName
+          - DBUsername
+          - DBPassword
+          - EnableRDSDeletionProtection
+      - Label:
+          default: 'Backstage Configuration'
+        Parameters:
+          - ECRRepositoryName
+          - BackstageImageTag
+          - GitHubToken
+          - GitHubOrg
+          - GitHubRepo
+          - TerraformStateBucketName
+          - EnableStateLocking
+
+Parameters:
+  # Existing Infrastructure Parameters
+  ExistingVPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'Existing VPC ID (REQUIRED)'
+
+  ExistingVPCCidr:
+      Type: String
+      Description: 'Existing VPC CIDR (REQUIRED)'
+
+  ExistingPrivateSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Existing Private Subnet 1 ID (REQUIRED - for RDS)'
+
+  ExistingPrivateSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Existing Private Subnet 2 ID (REQUIRED - for RDS Multi-AZ)'
+
+  ExistingEKSCluster:
+    Type: String
+    Description: 'Existing EKS Cluster Name (REQUIRED)'
+    MinLength: 1
+
+  ExistingEKSNamespace:
+    Type: String
+    Default: 'backstage'
+    Description: 'Kubernetes namespace for Backstage deployment'
+
+  # RDS Parameters
+  DBInstanceClass:
+    Type: String
+    Default: 'db.t3.medium'
+    Description: 'RDS instance class'
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+    Description: 'Allocated storage for RDS in GB'
+
+  DBName:
+    Type: String
+    Default: 'backstage'
+    Description: 'Database name'
+
+  DBUsername:
+    Type: String
+    NoEcho: true
+    Description: 'Database master username (must be provided in parameters.json)'
+
+  # Backstage Parameters
+  ECRRepositoryName:
+    Type: String
+    Default: 'backstage-app'
+    Description: 'ECR repository name for Backstage image'
+
+  BackstageImageTag:
+    Type: String
+    Default: 'latest'
+    Description: 'Backstage Docker image tag'
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: 'GitHub Personal Access Token for Backstage'
+
+  GitHubOrg:
+    Type: String
+    Description: 'GitHub Organization name'
+
+  GitHubRepo:
+    Type: String
+    Default: 'backstage-terraform-idp'
+    Description: 'GitHub Repository name'
+
+  TerraformStateBucketName:
+    Type: String
+    Default: ''
+    Description: 'S3 bucket name for Terraform state (leave empty for auto-generated name)'
+  
+  EnableStateLocking:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable DynamoDB table for Terraform state locking (recommended)'
+
+Conditions:
+  HasTerraformBucketName: !Not [!Equals [!Ref TerraformStateBucketName, '']]
+  CreateStateLockTable: !Equals [!Ref EnableStateLocking, 'true']
+
+Resources:
+  # ==================== KMS Keys ====================
+  # KMS Key for Backstage encryption
+  BackstageKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Backstage encryption (Secrets Manager and RDS)
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Ref 'AWS::AccountId'
+          - Sid: Allow Secrets Manager
+            Effect: Allow
+            Principal:
+              Service: secretsmanager.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-secrets-kms'
+
+  BackstageKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-backstage'
+      TargetKeyId: !Ref BackstageKMSKey
+
+  # KMS Key for ECR
+  ECRKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for ECR encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Ref 'AWS::AccountId'
+          - Sid: Allow ECR
+            Effect: Allow
+            Principal:
+              Service: ecr.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:CreateGrant'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'ecr.${AWS::Region}.amazonaws.com'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ecr-kms'
+
+  ECRKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-ecr'
+      TargetKeyId: !Ref ECRKMSKey
+
+  # ==================== ECR Repository ====================
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRRepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !GetAtt ECRKMSKey.Arn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-backstage-ecr'
+
+  # ==================== GitHub OIDC Provider ====================
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-github-oidc'
+
+  # ==================== S3 Buckets ====================
+  # S3 Access Logs Bucket
+  S3AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-s3-access-logs-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 30
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-s3-access-logs'
+        - Key: Purpose
+          Value: S3AccessLogs
+
+  S3AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - 's3:PutObject'
+            Resource: !Sub '${S3AccessLogsBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt S3AccessLogsBucket.Arn
+              - !Sub '${S3AccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # Terraform state bucket
+  TerraformStateBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: S3AccessLogsBucketPolicy
+    Properties:
+      BucketName: !If
+        - HasTerraformBucketName
+        - !Ref TerraformStateBucketName
+        - !Sub '${AWS::StackName}-terraform-state-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: 'terraform-state-logs/'
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-terraform-state'
+        - Key: Purpose
+          Value: TerraformState
+
+  # S3 Bucket Policy to enforce SSL/TLS
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub '${TerraformStateBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # ==================== DynamoDB Table for Terraform State Locking ====================
+  # KMS Key for DynamoDB
+  DynamoDBKMSKey:
+    Type: AWS::KMS::Key
+    Condition: CreateStateLockTable
+    Properties:
+      Description: KMS key for DynamoDB state lock table encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Ref 'AWS::AccountId'
+          - Sid: Allow DynamoDB
+            Effect: Allow
+            Principal:
+              Service: dynamodb.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:CreateGrant'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dynamodb-kms'
+
+  DynamoDBKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateStateLockTable
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-dynamodb'
+      TargetKeyId: !Ref DynamoDBKMSKey
+
+  TerraformStateLockTable:
+    Type: AWS::DynamoDB::Table
+    Condition: CreateStateLockTable
+    Properties:
+      TableName: terraform-state-lock
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: LockID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: LockID
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBKMSKey
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-terraform-state-lock'
+        - Key: Purpose
+          Value: TerraformStateLocking
+
+  # ==================== IAM Role for GitHub Actions ====================
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-github-actions-role'
+      Description: IAM role for GitHub Actions to deploy Terraform resources
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !GetAtt GitHubOIDCProvider.Arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
+      Policies:
+        - PolicyName: TerraformEC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EC2ReadOnly
+                Effect: Allow
+                Action:
+                  - 'ec2:Describe*'
+                Resource: '*'
+              - Sid: EC2WriteScoped
+                Effect: Allow
+                Action:
+                  - 'ec2:RunInstances'
+                  - 'ec2:TerminateInstances'
+                  - 'ec2:StopInstances'
+                  - 'ec2:StartInstances'
+                  - 'ec2:RebootInstances'
+                  - 'ec2:ModifyInstanceAttribute'
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:key-pair/*'
+              - Sid: EC2Tagging
+                Effect: Allow
+                Action:
+                  - 'ec2:CreateTags'
+                  - 'ec2:DeleteTags'
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:key-pair/*'
+              - Sid: EC2SecurityGroups
+                Effect: Allow
+                Action:
+                  - 'ec2:CreateSecurityGroup'
+                  - 'ec2:DeleteSecurityGroup'
+                  - 'ec2:AuthorizeSecurityGroupIngress'
+                  - 'ec2:AuthorizeSecurityGroupEgress'
+                  - 'ec2:RevokeSecurityGroupIngress'
+                  - 'ec2:RevokeSecurityGroupEgress'
+                  - 'ec2:ModifySecurityGroupRules'
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
+        - PolicyName: TerraformRDSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RDSReadOnly
+                Effect: Allow
+                Action:
+                  - 'rds:Describe*'
+                  - 'rds:List*'
+                Resource: '*'
+              - Sid: RDSWriteScoped
+                Effect: Allow
+                Action:
+                  - 'rds:CreateDBInstance'
+                  - 'rds:DeleteDBInstance'
+                  - 'rds:ModifyDBInstance'
+                  - 'rds:CreateDBSubnetGroup'
+                  - 'rds:DeleteDBSubnetGroup'
+                  - 'rds:ModifyDBSubnetGroup'
+                  - 'rds:CreateDBParameterGroup'
+                  - 'rds:ModifyDBParameterGroup'
+                  - 'rds:DeleteDBParameterGroup'
+                  - 'rds:AddTagsToResource'
+                  - 'rds:RemoveTagsFromResource'
+                Resource:
+                  - !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:*'
+                  - !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*'
+                  - !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:*'
+        - PolicyName: TerraformS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3ReadOnly
+                Effect: Allow
+                Action:
+                  - 's3:ListAllMyBuckets'
+                  - 's3:GetBucketLocation'
+                Resource: '*'
+              - Sid: S3WriteScoped
+                Effect: Allow
+                Action:
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:PutBucketPolicy'
+                  - 's3:DeleteBucketPolicy'
+                  - 's3:PutBucketVersioning'
+                  - 's3:PutBucketEncryption'
+                  - 's3:PutBucketPublicAccessBlock'
+                  - 's3:PutBucketTagging'
+                  - 's3:PutBucketLogging'
+                  - 's3:PutLifecycleConfiguration'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AWS::StackName}-*'
+                  - !Sub 'arn:aws:s3:::terraform-*'
+              - Sid: S3ObjectOperations
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AWS::StackName}-*'
+                  - !Sub 'arn:aws:s3:::${AWS::StackName}-*/*'
+                  - !Sub 'arn:aws:s3:::terraform-*'
+                  - !Sub 'arn:aws:s3:::terraform-*/*'
+        - PolicyName: TerraformStateAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:GetObjectVersion'
+                Resource:
+                  - !GetAtt TerraformStateBucket.Arn
+                  - !Sub '${TerraformStateBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/terraform-state-lock'
+        - PolicyName: TerraformIAMPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: IAMReadOnly
+                Effect: Allow
+                Action:
+                  - 'iam:GetRole'
+                  - 'iam:ListAttachedRolePolicies'
+                  - 'iam:GetInstanceProfile'
+                  - 'iam:ListInstanceProfiles'
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/terraform-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/terraform-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/${AWS::StackName}-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:policy/terraform-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:policy/${AWS::StackName}-*'
+              - Sid: IAMRoleManagement
+                Effect: Allow
+                Action:
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:TagRole'
+                  - 'iam:UntagRole'
+                  - 'iam:CreateInstanceProfile'
+                  - 'iam:DeleteInstanceProfile'
+                  - 'iam:AddRoleToInstanceProfile'
+                  - 'iam:RemoveRoleFromInstanceProfile'
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/terraform-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/terraform-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/${AWS::StackName}-*'
+              - Sid: IAMAttachSSMPolicyOnly
+                Effect: Allow
+                Action:
+                  - 'iam:AttachRolePolicy'
+                  - 'iam:DetachRolePolicy'
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/terraform-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+                Condition:
+                  ArnEquals:
+                    'iam:PolicyArn': 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+              - Sid: IAMPassRole
+                Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/terraform-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService':
+                      - 'ec2.amazonaws.com'
+                      - 'rds.amazonaws.com'
+        - PolicyName: TerraformLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:DeleteLogGroup'
+                  - 'logs:PutRetentionPolicy'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+        - PolicyName: TerraformSSMPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SSMPublicAMIParameterRead
+                Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - 'arn:aws:ssm:*:*:parameter/aws/service/ami-amazon-linux-latest/*'
+                  - 'arn:aws:ssm:*:*:parameter/aws/service/ami-windows-latest/*'
+        - PolicyName: TerraformKMSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: KMSForRDSEncryption
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:DescribeKey'
+                  - 'kms:CreateGrant'
+                Resource: !GetAtt RDSKMSKey.Arn
+        - PolicyName: TerraformSecretsManagerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerReadRDSPassword
+                Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:DescribeSecret'
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-github-actions-role'
+
+  # ==================== RDS Database ====================
+  # IAM Role for RDS Enhanced Monitoring
+  RDSMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RDSEnhancedMonitoringPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogStreams'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:RDSOSMetrics:*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rds-monitoring-role'
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Backstage RDS
+      SubnetIds:
+        - !Ref ExistingPrivateSubnet1
+        - !Ref ExistingPrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-subnet-group'
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Backstage RDS - allows access from VPC
+      VpcId: !Ref ExistingVPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5433
+          ToPort: 5433
+          CidrIp: !Ref ExistingVPCCidr
+          Description: 'Allow PostgreSQL access from VPC'
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref ExistingVPCCidr
+          Description: 'Allow PostgreSQL access from VPC'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-sg'
+
+  # KMS Key for RDS Storage Encryption
+  RDSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for RDS storage encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Ref 'AWS::AccountId'
+          - Sid: Allow RDS
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:CreateGrant'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'rds.${AWS::Region}.amazonaws.com'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rds-kms'
+
+  RDSKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-rds'
+      TargetKeyId: !Ref RDSKMSKey
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-db'
+      Engine: postgres
+      EngineVersion: '17.2'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !GetAtt RDSKMSKey.Arn
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      ManageMasterUserPassword: true
+      MasterUserSecret:
+        KmsKeyId: !GetAtt BackstageKMSKey.Arn
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: true
+      PubliclyAccessible: false
+      EnableIAMDatabaseAuthentication: true
+      DeletionProtection: true
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSMonitoringRole.Arn
+      Port: 5433
+      EnableCloudwatchLogsExports:
+        - postgresql
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rds'
+
+  # ==================== Secrets Manager ====================
+  BackstageSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}/backstage/secrets'
+      Description: 'Backstage configuration secrets'
+      KmsKeyId: !GetAtt BackstageKMSKey.Arn
+      SecretString: !Sub |
+        {
+          "POSTGRES_HOST": "${RDSInstance.Endpoint.Address}",
+          "POSTGRES_PORT": "${RDSInstance.Endpoint.Port}",
+          "POSTGRES_USER": "${DBUsername}",
+          "RDS_SECRET_ARN": "${RDSInstance.MasterUserSecret.SecretArn}",
+          "GITHUB_TOKEN": "${GitHubToken}",
+          "GITHUB_ORG": "${GitHubOrg}",
+          "ECR_REPOSITORY_URI": "${ECRRepository.RepositoryUri}",
+          "ECR_REPOSITORY_NAME": "${ECRRepositoryName}",
+          "BACKSTAGE_IMAGE_TAG": "${BackstageImageTag}",
+          "EKS_CLUSTER_NAME": "${ExistingEKSCluster}",
+          "EKS_NAMESPACE": "${ExistingEKSNamespace}"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-secrets'
+
+Outputs:
+  VPCId:
+    Description: VPC ID (existing)
+    Value: !Ref ExistingVPCId
+    Export:
+      Name: !Sub '${AWS::StackName}-VPCId'
+
+  EKSClusterName:
+    Description: EKS Cluster Name (existing)
+    Value: !Ref ExistingEKSCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterName'
+
+  EKSNamespace:
+    Description: Kubernetes namespace for Backstage
+    Value: !Ref ExistingEKSNamespace
+    Export:
+      Name: !Sub '${AWS::StackName}-Namespace'
+
+  RDSEndpoint:
+    Description: RDS Endpoint
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-RDSEndpoint'
+
+  RDSPort:
+    Description: RDS Port (non-default 5433)
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-RDSPort'
+
+  RDSMasterSecretArn:
+    Description: ARN of AWS-managed RDS master password secret
+    Value: !GetAtt RDSInstance.MasterUserSecret.SecretArn
+    Export:
+      Name: !Sub '${AWS::StackName}-RDSMasterSecretArn'
+
+  BackstageSecretsArn:
+    Description: Backstage Secrets ARN
+    Value: !Ref BackstageSecrets
+    Export:
+      Name: !Sub '${AWS::StackName}-SecretsArn'
+
+  ECRRepositoryUri:
+    Description: ECR Repository URI
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryUri'
+
+  ECRRepositoryName:
+    Description: ECR Repository Name
+    Value: !Ref ECRRepositoryName
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryName'
+
+  BackstageImageTag:
+    Description: Backstage Image Tag
+    Value: !Ref BackstageImageTag
+    Export:
+      Name: !Sub '${AWS::StackName}-BackstageImageTag'
+
+  KubectlConfigCommand:
+    Description: Command to configure kubectl
+    Value: !Sub 'aws eks update-kubeconfig --name ${ExistingEKSCluster} --region ${AWS::Region}'
+
+  ECRLoginCommand:
+    Description: Command to login to ECR
+    Value: !Sub 'aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+
+  TerraformStateBucket:
+    Description: S3 bucket for Terraform state
+    Value: !Ref TerraformStateBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-TerraformStateBucket'
+
+  GitHubActionsRoleArn:
+    Description: IAM role ARN for GitHub Actions
+    Value: !GetAtt GitHubActionsRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GitHubActionsRoleArn'
+
+  GitHubOIDCProviderArn:
+    Description: GitHub OIDC Provider ARN
+    Value: !GetAtt GitHubOIDCProvider.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GitHubOIDCProviderArn'
+
+  TerraformStateLockTable:
+    Condition: CreateStateLockTable
+    Description: DynamoDB table for Terraform state locking
+    Value: !Ref TerraformStateLockTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TerraformStateLockTable'
+
+  BackstageKMSKeyId:
+    Description: KMS Key ID for Backstage encryption
+    Value: !Ref BackstageKMSKey
+    Export:
+      Name: !Sub '${AWS::StackName}-BackstageKMSKeyId'
+
+  ECRKMSKeyId:
+    Description: KMS Key ID for ECR
+    Value: !Ref ECRKMSKey
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRKMSKeyId'
+
+  RDSKMSKeyId:
+    Description: KMS Key ID for RDS storage encryption
+    Value: !Ref RDSKMSKey
+    Export:
+      Name: !Sub '${AWS::StackName}-RDSKMSKeyId'
+
+  DeploymentSummary:
+    Description: Quick reference for deployment
+    Value: !Sub |
+      Stack: ${AWS::StackName}
+      Region: ${AWS::Region}
+      VPC: ${ExistingVPCId}
+      EKS Cluster: ${ExistingEKSCluster}
+      RDS Endpoint: ${RDSInstance.Endpoint.Address}:${RDSInstance.Endpoint.Port}
+      ECR Repository: ${ECRRepository.RepositoryUri}
+      Secrets: ${BackstageSecrets}

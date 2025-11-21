@@ -1,0 +1,214 @@
+# Production Environment Helm Values
+# Full production configuration with high availability
+
+backstage:
+  image:
+    registry: ${ECR_REGISTRY}
+    repository: ${ECR_REPOSITORY}
+    tag: ${BACKSTAGE_TAG}
+    pullPolicy: IfNotPresent
+  
+  extraEnvVars:
+    - name: POSTGRES_HOST
+      valueFrom:
+        secretKeyRef:
+          name: backstage-postgres-secret
+          key: postgres-host
+    - name: POSTGRES_PORT
+      valueFrom:
+        secretKeyRef:
+          name: backstage-postgres-secret
+          key: postgres-port
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          name: backstage-postgres-secret
+          key: postgres-user
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: backstage-postgres-secret
+          key: postgres-password
+    - name: GITHUB_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: backstage-github-secret
+          key: github-token
+    - name: NODE_ENV
+      value: "development"
+    - name: LOG_LEVEL
+      value: "warn"
+  
+  appConfig:
+    app:
+      title: Backstage Terraform IDP
+      baseUrl: ${BASE_URL}
+    
+    organization:
+      name: ${ORGANIZATION_NAME}
+    
+    backend:
+      baseUrl: ${BASE_URL}
+      listen:
+        port: 7007
+        host: 0.0.0.0
+      csp:
+        connect-src: ["'self'", 'http:', 'https:']
+      cors:
+        origin: ${BASE_URL}
+        methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+        credentials: true
+      database:
+        client: pg
+        connection:
+          host: ${POSTGRES_HOST}
+          port: ${POSTGRES_PORT}
+          user: ${POSTGRES_USER}
+          password: ${POSTGRES_PASSWORD}
+          ssl:
+            rejectUnauthorized: false
+    
+    integrations:
+      github:
+        - host: github.com
+          token: ${GITHUB_TOKEN}
+    
+    catalog:
+      rules:
+        - allow: [Component, System, API, Resource, Location, Template]
+      locations:
+        # AWS EC2 Instance Template
+        - type: url
+          target: https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/blob/main/backstage-templates/aws-ec2-instance/template.yaml
+          rules:
+            - allow: [Template]
+        # AWS S3 Bucket Template
+        - type: url
+          target: https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/blob/main/backstage-templates/aws-s3-bucket/template.yaml
+          rules:
+            - allow: [Template]
+        # AWS RDS Database Template
+        - type: url
+          target: https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/blob/main/backstage-templates/aws-rds-instance/template.yaml
+          rules:
+            - allow: [Template]
+      # Production catalog refresh settings
+      refresh:
+        frequency:
+          minutes: 10
+    
+    scaffolder:
+      defaultAuthor:
+        name: ${ORGANIZATION_NAME}
+        email: ${SCAFFOLDER_EMAIL}
+      defaultCommitMessage: 'Initial commit from Backstage'
+    
+    techdocs:
+      builder: 'local'
+      generator:
+        runIn: 'local'
+      publisher:
+        type: 'local'
+    
+    auth:
+      environment: development
+      providers:
+        guest: {}
+    
+    kubernetes:
+      serviceLocatorMethod:
+        type: 'multiTenant'
+      clusterLocatorMethods:
+        - type: 'config'
+          clusters: []
+
+service:
+  type: ClusterIP
+  ports:
+    backend: 7007
+    targetPort: backend
+
+ingress:
+  # Disabled by default - use kubectl port-forward for access
+  # To enable with custom domain and SSL, see docs/DEPLOYMENT-GUIDE.md
+  enabled: false
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    # For HTTPS with custom domain, uncomment and configure:
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:region:account:certificate/xxx
+    # alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/healthcheck-path: /healthcheck
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=60
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+  host: ""
+  # For custom domain, set host:
+  # host: "backstage.example.com"
+
+postgresql:
+  enabled: false
+
+# Production resources
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
+
+# High availability with 3 replicas
+replicaCount: 1
+
+# Pod disruption budget for HA
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Production-grade health checks
+livenessProbe:
+  enabled: true
+  path: /healthcheck
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  path: /healthcheck
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+# Pod anti-affinity for spreading across nodes
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - backstage
+          topologyKey: kubernetes.io/hostname
+
+# Horizontal Pod Autoscaler (optional)
+# autoscaling:
+#   enabled: true
+#   minReplicas: 3
+#   maxReplicas: 10
+#   targetCPUUtilizationPercentage: 70
+#   targetMemoryUtilizationPercentage: 80

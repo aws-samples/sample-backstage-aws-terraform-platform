@@ -1,0 +1,35 @@
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: aws-ec2-instance-templates
+  description: AWS EC2 Instance template and component definitions
+spec:
+  targets:
+    - ./template.yaml
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: aws-ec2-instance-template
+  title: AWS EC2 Instance Template
+  description: Self-service template for provisioning EC2 instances with official AWS modules
+  annotations:
+    github.com/project-slug: YOUR_GITHUB_ORG/${GITHUB_REPO}
+  tags:
+    - terraform
+    - aws
+    - ec2
+    - compute
+    - template
+  links:
+    - url: https://github.com/YOUR_GITHUB_ORG/${GITHUB_REPO}/tree/main/backstage-templates/aws-ec2-instance
+      title: Template Source
+      icon: github
+    - url: https://github.com/YOUR_GITHUB_ORG/${GITHUB_REPO}/tree/main/terraform/ec2
+      title: Terraform Module
+      icon: code
+spec:
+  type: template
+  owner: platform-team
+  lifecycle: production
+  system: aws-infrastructure
