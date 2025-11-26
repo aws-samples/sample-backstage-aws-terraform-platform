@@ -240,59 +240,7 @@ else
     print_info "DynamoDB state locking not enabled, skipping"
 fi
 
-print_header "Step 5/6: Delete EKS-Created Security Groups"
-
-# Get VPC ID from CloudFormation
-VPC_ID=$(aws cloudformation describe-stacks \
-  --stack-name $STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='VPCId'].OutputValue" \
-  --output text 2>/dev/null)
-
-if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
-    print_info "Checking for EKS-created security groups in VPC: $VPC_ID"
-    
-    # Find security groups created by EKS (they have specific tags)
-    EKS_SGS=$(aws ec2 describe-security-groups \
-      --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:kubernetes.io/cluster/$CLUSTER_NAME,Values=owned" \
-      --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
-      --output text 2>/dev/null)
-    
-    if [ -n "$EKS_SGS" ]; then
-        print_info "Found EKS-created security groups: $EKS_SGS"
-        
-        # Delete each security group
-        for sg in $EKS_SGS; do
-            print_info "Deleting security group: $sg"
-            
-            # First, remove all ingress and egress rules (suppress output)
-            aws ec2 revoke-security-group-ingress \
-              --group-id "$sg" \
-              --ip-permissions "$(aws ec2 describe-security-groups --group-ids "$sg" --query 'SecurityGroups[0].IpPermissions' --output json 2>/dev/null)" \
-              > /dev/null 2>&1 || true
-            
-            aws ec2 revoke-security-group-egress \
-              --group-id "$sg" \
-              --ip-permissions "$(aws ec2 describe-security-groups --group-ids "$sg" --query 'SecurityGroups[0].IpPermissionsEgress' --output json 2>/dev/null)" \
-              > /dev/null 2>&1 || true
-            
-            # Delete the security group
-            if aws ec2 delete-security-group --group-id "$sg" > /dev/null 2>&1; then
-                print_success "Deleted security group: $sg"
-            else
-                print_warn "Could not delete $sg (has dependencies - will be cleaned up by CloudFormation)"
-            fi
-        done
-        
-        print_info "Note: Some security groups may remain if they have dependencies"
-        print_info "CloudFormation will handle final cleanup"
-    else
-        print_info "No EKS-created security groups found"
-    fi
-else
-    print_warn "VPC ID not found, skipping security group cleanup"
-fi
-
-print_header "Step 6/7: Disable RDS Deletion Protection"
+print_header "Step 5/6: Disable RDS Deletion Protection"
 
 # Check if RDS instance exists and has deletion protection enabled
 RDS_INSTANCE=$(aws cloudformation describe-stack-resources \
@@ -332,7 +280,7 @@ else
     print_info "RDS instance not found, skipping"
 fi
 
-print_header "Step 7/7: Delete CloudFormation Stack"
+print_header "Step 6/6: Delete CloudFormation Stack"
 
 print_info "Initiating stack deletion..."
 aws cloudformation delete-stack --stack-name $STACK_NAME

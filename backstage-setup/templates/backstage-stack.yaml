@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Simplified Backstage Stack - Uses existing VPC and EKS cluster with all security vulnerabilities fixed'
+Description: 'Simplified Backstage Stack - Uses existing VPC and EKS cluster'
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -99,6 +99,7 @@ Parameters:
     Type: String
     NoEcho: true
     Description: 'GitHub Personal Access Token for Backstage'
+    Default: ''
 
   GitHubOrg:
     Type: String

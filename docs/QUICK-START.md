@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Deploy Backstage using your existing VPC and EKS cluster with all security vulnerabilities resolved.
+Deploy Backstage using your existing VPC and EKS cluster.
 
 | | |
 |---|---|
@@ -81,7 +81,6 @@ cat > parameters.json << 'EOF'
   {"ParameterKey": "ExistingPrivateSubnet1", "ParameterValue": "subnet-XXXXX"},
   {"ParameterKey": "ExistingPrivateSubnet2", "ParameterValue": "subnet-XXXXX"},
   {"ParameterKey": "ExistingEKSCluster", "ParameterValue": "my-eks-cluster"},
-  {"ParameterKey": "GitHubToken", "ParameterValue": "REPLACE_WITH_GITHUB_TOKEN"},
   {"ParameterKey": "GitHubOrg", "ParameterValue": "your-github-org"},
   {"ParameterKey": "GitHubRepo", "ParameterValue": "repo-name"},
   {"ParameterKey": "EnableStateLocking", "ParameterValue": "true"}
@@ -95,7 +94,6 @@ EOF
 - `ExistingPrivateSubnet1` → Your first private subnet ID
 - `ExistingPrivateSubnet2` → Your second private subnet ID
 - `ExistingEKSCluster` → Your EKS cluster name
-- `GitHubToken` → Your GitHub Personal Access Token
 - `GitHubOrg` → Your GitHub organization or username
 - `GitHubRepo` → GitHub repository name that will be used while forking this repo in the mentioned GitHub organization
 
@@ -113,6 +111,17 @@ aws cloudformation create-stack \
 # Wait for completion (10-15 minutes)
 aws cloudformation wait stack-create-complete --stack-name backstage-platform
 ```
+
+### Add GitHub Token to Secrets Manager
+
+After the CloudFormation stack completes, add your GitHub Personal Access Token to the Secrets Manager secret:
+
+1. Go to **AWS Secrets Manager Console**
+2. Open the secret: `backstage-platform/backstage/secrets`
+3. Edit the secret and update the `GITHUB_TOKEN` field with your GitHub Personal Access Token
+4. Save the changes
+
+> **Note:** The secret is created by CloudFormation with an empty `GITHUB_TOKEN` value that you need to populate.
 
 **Resources created:**
 - ✅ RDS PostgreSQL database (AWS-managed password, no manual password needed)

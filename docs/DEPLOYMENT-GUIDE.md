@@ -121,7 +121,6 @@ cat > parameters.json << 'EOF'
   {"ParameterKey": "ExistingPrivateSubnet1", "ParameterValue": "subnet-XXXXX"},
   {"ParameterKey": "ExistingPrivateSubnet2", "ParameterValue": "subnet-XXXXX"},
   {"ParameterKey": "ExistingEKSCluster", "ParameterValue": "my-eks-cluster"},
-  {"ParameterKey": "GitHubToken", "ParameterValue": "REPLACE_WITH_GITHUB_TOKEN"},
   {"ParameterKey": "GitHubOrg", "ParameterValue": "your-github-org"},
   {"ParameterKey": "GitHubRepo", "ParameterValue": "repo-name"},
   {"ParameterKey": "EnableStateLocking", "ParameterValue": "true"}
@@ -132,8 +131,8 @@ EOF
 **Replace with your values:**
 - VPC ID and subnet IDs
 - EKS cluster name
-- GitHub token
 - GitHub organization
+- GitHub repository name
 
 > **💡 Note:** AWS RDS automatically generates and manages the database password securely
 
@@ -149,6 +148,17 @@ aws cloudformation create-stack \
 # Wait for completion (10-15 minutes)
 aws cloudformation wait stack-create-complete --stack-name backstage-platform
 ```
+
+### Step 2.5: Add GitHub Token to Secrets Manager
+
+After the CloudFormation stack completes, update the Secrets Manager secret with your GitHub Personal Access Token:
+
+1. Navigate to **AWS Secrets Manager Console**
+2. Find and open the secret: `backstage-platform/backstage/secrets`
+3. Edit the secret value and update the `GITHUB_TOKEN` field with your token
+4. Save the changes
+
+⚠️ **Important:** Use the GitHub Personal Access Token you created in the Prerequisites section.
 
 **What gets created:**
 - ✅ RDS PostgreSQL with AWS-managed password and enhanced security
@@ -391,8 +401,10 @@ For detailed cleanup instructions, see [CLEANUP.md](./CLEANUP.md)
 > **Note:** Database password is automatically generated and managed by AWS RDS. RDS is configured with Multi-AZ for high availability.
 
 **GitHub:**
-- `GitHubToken` - Personal Access Token (required)
 - `GitHubOrg` - Organization name (required)
+- `GitHubRepo` - Repository name (required)
+
+> **Note:** GitHub Personal Access Token must be added to Secrets Manager after stack deployment (see Phase 1, Step 2.5).
 
 **Optional:**
 - `EnableStateLocking` - DynamoDB state locking (default: true)
