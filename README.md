@@ -152,10 +152,6 @@ Uses official AWS modules from [terraform-aws-modules](https://github.com/terraf
 │   │   ├── setup-repo.sh              # Repository setup
 │   │   ├── build-image.sh             # Build Docker image
 │   │   └── deploy-backstage.sh        # Deploy to EKS
-│   └── image/                         # Docker image configuration
-│       ├── Dockerfile                 # Official Backstage Dockerfile
-│       └── app-config.yaml            # Default configuration
-│
 ├── backstage-templates/               # 📋 Backstage templates
 │   ├── aws-ec2-instance/
 │   ├── aws-s3-bucket/

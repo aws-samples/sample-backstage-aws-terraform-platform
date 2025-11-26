@@ -188,7 +188,7 @@ https://backstage.example.com
 ### Disadvantages
 ❌ **Requires domain** - Must own and manage a domain
 ❌ **SSL certificate** - Need to request and validate ACM certificate
-❌ **Additional cost** - ALB costs ~$20-25/month
+❌ **Additional cost** - ALB cost
 ❌ **DNS management** - Need to create and maintain DNS records
 
 ### When to Use
@@ -204,7 +204,6 @@ https://backstage.example.com
 | Feature | Port Forward | ALB + Domain |
 |---------|-------------|--------------|
 | **Setup Time** | 1 minute | 30-60 minutes |
-| **Cost** | Free | ~$20-25/month |
 | **Domain Required** | No | Yes |
 | **SSL Certificate** | No | Yes |
 | **Team Access** | No | Yes |
